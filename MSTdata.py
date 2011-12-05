@@ -161,165 +161,7 @@ class Signal(dict):
                                       window=None)
 
 
-class Ensemble(dict):
-
-    """A class that creates a grouping of common signals from a shot
-    list to perform operations like calculating distribution
-    functions, timeseries averaging, etc. The ensemble does not
-    contain the raw data -- that is the job of the MSTdata class --
-    only information on the ensemble."""
-
-    def __init__(self, name='', shotlist=[], nodelist=[], condition=None):
-
-        self.name = name
-        self.shotlist = shotlist
-        self.nodelist = nodelist
-        self.data = {}
-        self.condition = slice(0,Ellipsis)   # Default to using it all
-        
-        # Now we will implement the specified condition. In the
-        # following set of cases, the condition will specify what
-        # elements of the timeseries signals are of interest for
-        # analysis.
-        if condition is None:
-            shot = self.shotlist[0]
-            current = MSTdata(shot)['\\mst_ops::ip']['signal']
-            self.condition = slice(0,len(current))
-        if condition is 'flattop':
-            for shot in shotlist:
-                # The current flattop will be defined as the period
-                # when the measured plasma current is within 2.5% of its
-                # maximum
-                current = MSTdata(shot)['\\mst_ops::ip']
-                curr = current['signal'].max()
-                curr_array = where((abs((current['signal'] -
-                                         curr))/curr) < 0.05)
-                self.condition = slice(max(curr_array[0], 
-                                           self.condition.start), 
-                                       min(curr_array[-1], 
-                                           self.condition.stop))
-                self.start_time = current['time'][self.condition.start]
-                self.stop_time = current['time'][self.condition.stop]
-
-    def __getitem__(self, node):
-
-        # If the ensemble average has already been calculated then it
-        # will be in the data dictionary
-        if self.data.has_key(node): return self.data[node]
-
-        # Grab the first shot off the shotlist to determine the length
-        # of the arrays and to initialize the average, minimum, and
-        # maximum arrays.
-        shotlist = list(self.shotlist)
-        shot = shotlist.pop()
-        shot_data = MSTdata(shot)
-        sig = shot_data[node]
-        time_window = (sig['time'] >= self.start_time) & \
-            (sig['time'] <= self.stop_time) 
-        # Provide a clean exit incase there is no time overlap with
-        # the ensemble condition
-        if time_window.any() is False:
-            print 'Data are unavailable for ' + node + \
-                ' during condition used in ensemble.'
-            return
-
-        sig['time'] = sig['time'][time_window]
-        sig['signal'] = sig['signal'][time_window]
-        sig_sum = sig['signal']
-        min_sig = sig['signal']
-        max_sig = sig['signal']
-
-        for shot in shotlist:
-            shot_data = MSTdata(shot)
-            sig = shot_data[node]
-            time_window = (sig['time'] >= self.start_time) & \
-                (sig['time'] <= self.stop_time) 
-            sig['time'] = sig['time'][time_window]
-            sig['signal'] = sig['signal'][time_window]
-            min_sig = array([min_sig, sig['signal']]).min(axis=0)
-            max_sig = array([max_sig, sig['signal']]).max(axis=0)
-            sig_sum += sig['signal']
-
-        # What we store and return is an enemble-averaged signal along
-        # with the range of possible values
-        sig['signal'] = sig_sum / len(self.shotlist)
-        sig['max'] = max_sig
-        sig['min'] = min_sig
-        self.data[node] = sig
-
-        return sig
-
-
-    def __len__(self):
-
-        """We define the length of an ensemble based on the length of
-        the condition slice."""
-
-        return self.condition.stop - self.condition.start
-
-
-    def calc_distribution(self, **keywords):
-
-        """Estimate the distribution function for a signal by creating
-        a normalized histogram. Additional keywords are passed to
-        scipy's 'histogram' function."""
-        
-        keywords['density'] = True
-        if not keywords.has_key('bins'): 
-            n_bins = 51
-        else:
-            if type(keywords['bins']) is int: n_bins = keywords['bins']
-            else: n_bins = len(keywords['bins']) - 1
-
-        # Make a copy of the shotlist so that we can pop off a single
-        # shot to initialize the histogram arrays
-        shotlist = list(self.shotlist)
-
-        # Initialize the arrays of distributions and the bins used for
-        # each signal by looking at just one shot in the shotlist
-        shot = shotlist.pop()
-        shot_data = MSTdata(shot)
-        for node in self.nodelist:
-            time_window = (shot_data[node]['time'] >= self.start_time) & \
-                (shot_data[node]['time'] <= self.stop_time)
-            hist, bin = histogram(shot_data[node]['signal'][time_window], 
-                                  **keywords)
-            self[node]['distribution'] = array([hist, bin])
-
-        # Now proceed with the rest of the shots in the shotlist
-        for shot in shotlist:
-            shot_data = MSTdata(shot)
-            for node in self.nodelist:
-                time_window = (shot_data[node]['time'] >= self.start_time) & \
-                    (shot_data[node]['time'] <= self.stop_time)
-                keywords['bins'] = self[node]['distribution'][1]
-                hist, bin = histogram(shot_data[node]['signal'][time_window],
-                                      **keywords)
-                self[node]['distribution'][0] += hist
-
-        # Now normalize the distributions
-        for node in self.nodelist:
-            hist = self[node]['distribution'][0]
-            hist /= hist.sum()
-
-    def plot_distribution(self, node, **keywords):
-        
-        """Once the distributions have been calculated they can be
-        plotted as a probability distribution curve."""
-
-        if node in self.data and 'distribution' in self[node]:
-
-            dist, bins = self[node]['distribution']
-            height = 0.75*(bins[1]-bins[0])
-
-            p.figure(figsize=(12,5))
-            ax1 = p.subplot(121)
-            self[node].plot()
-            ylim = ax1.get_ylim()
-            ax2 = p.subplot(122)
-            p.barh(bins[0:-1], dist, height=height, label=self[node]['name'])
-            p.xlabel('PDF')
-            ax2.set_ylim(ylim)
+           ax2.set_ylim(ylim)
 
 class MSTdata:
 
@@ -633,18 +475,175 @@ class MSTdata:
         subtree = 'mst_tsmp'
         node = ['top.proc_tsmp.t_e']
         self.get(node, subtree, dims=['time', 'r'])
-
-
-class MSTfit:
-
-    """A class that allows one to analyize MST data from an MSTfit
-    IDL save file."""
-
-    def __init__(filename = None):
-
-        try:
-            self.fit = idl.readsav(filename)
-        except:
-            print 'Can not open ' + filename
-
     
+class Ensemble(dict):
+
+    """A class that creates a grouping of common signals from a shot
+    list to perform operations like calculating distribution
+    functions, timeseries averaging, etc. The ensemble does not
+    contain the raw data -- that is the job of the MSTdata class --
+    only information on the ensemble."""
+
+    def __init__(self, name='', shotlist=[], nodelist=[], condition=None):
+
+        self.name = name
+        self.shotlist = shotlist
+        self.nodelist = nodelist
+        self.data = {}
+        self.condition = slice(0,Ellipsis)   # Default to using it all
+        
+        # Now we will implement the specified condition. In the
+        # following set of cases, the condition will specify what
+        # elements of the timeseries signals are of interest for
+        # analysis.
+        if condition is None:
+            shot = self.shotlist[0]
+            current = MSTdata(shot)['\\mst_ops::ip']['signal']
+            self.condition = slice(0,len(current))
+        if condition is 'flattop':
+            for shot in shotlist:
+                # The current flattop will be defined as the period
+                # when the measured plasma current is within 2.5% of its
+                # maximum
+                current = MSTdata(shot)['\\mst_ops::ip']
+                curr = current['signal'].max()
+                curr_array = where((abs((current['signal'] -
+                                         curr))/curr) < 0.05)
+                self.condition = slice(max(curr_array[0], 
+                                           self.condition.start), 
+                                       min(curr_array[-1], 
+                                           self.condition.stop))
+                self.start_time = current['time'][self.condition.start]
+                self.stop_time = current['time'][self.condition.stop]
+
+    def __getitem__(self, node):
+
+        # If the ensemble average has already been calculated then it
+        # will be in the data dictionary
+        if self.data.has_key(node): return self.data[node]
+
+        # Grab the first shot off the shotlist to determine the length
+        # of the arrays and to initialize the average, minimum, and
+        # maximum arrays.
+        shotlist = list(self.shotlist)
+        shot = shotlist.pop()
+        shot_data = MSTdata(shot)
+        sig = shot_data[node]
+        time_window = (sig['time'] >= self.start_time) & \
+            (sig['time'] <= self.stop_time) 
+        # Provide a clean exit incase there is no time overlap with
+        # the ensemble condition
+        if time_window.any() is False:
+            print 'Data are unavailable for ' + node + \
+                ' during condition used in ensemble.'
+            return
+
+        sig['time'] = sig['time'][time_window]
+        sig['signal'] = sig['signal'][time_window]
+        sig_sum = sig['signal']
+        min_sig = sig['signal']
+        max_sig = sig['signal']
+
+        for shot in shotlist:
+            shot_data = MSTdata(shot)
+            sig = shot_data[node]
+            time_window = (sig['time'] >= self.start_time) & \
+                (sig['time'] <= self.stop_time) 
+            sig['time'] = sig['time'][time_window]
+            sig['signal'] = sig['signal'][time_window]
+            min_sig = array([min_sig, sig['signal']]).min(axis=0)
+            max_sig = array([max_sig, sig['signal']]).max(axis=0)
+            sig_sum += sig['signal']
+
+        # What we store and return is an enemble-averaged signal along
+        # with the range of possible values
+        sig['signal'] = sig_sum / len(self.shotlist)
+        sig['max'] = max_sig
+        sig['min'] = min_sig
+        self.data[node] = sig
+
+        return sig
+
+
+    def __len__(self):
+
+        """We define the length of an ensemble based on the length of
+        the condition slice."""
+
+        return self.condition.stop - self.condition.start
+
+
+    def calc_distribution(self, **keywords):
+
+        """Estimate the distribution function for a signal by creating
+        a normalized histogram. Additional keywords are passed to
+        scipy's 'histogram' function."""
+        
+        keywords['density'] = True
+        if not keywords.has_key('bins'): 
+            n_bins = 51
+        else:
+            if type(keywords['bins']) is int: n_bins = keywords['bins']
+            else: n_bins = len(keywords['bins']) - 1
+
+        # Make a copy of the shotlist so that we can pop off a single
+        # shot to initialize the histogram arrays
+        shotlist = list(self.shotlist)
+
+        # Initialize the arrays of distributions and the bins used for
+        # each signal by looking at just one shot in the shotlist
+        shot = shotlist.pop()
+        shot_data = MSTdata(shot)
+        for node in self.nodelist:
+            time_window = (shot_data[node]['time'] >= self.start_time) & \
+                (shot_data[node]['time'] <= self.stop_time)
+            hist, bin = histogram(shot_data[node]['signal'][time_window], 
+                                  **keywords)
+            self[node]['distribution'] = array([hist, bin])
+
+        # Now proceed with the rest of the shots in the shotlist
+        for shot in shotlist:
+            shot_data = MSTdata(shot)
+            for node in self.nodelist:
+                time_window = (shot_data[node]['time'] >= self.start_time) & \
+                    (shot_data[node]['time'] <= self.stop_time)
+                keywords['bins'] = self[node]['distribution'][1]
+                hist, bin = histogram(shot_data[node]['signal'][time_window],
+                                      **keywords)
+                self[node]['distribution'][0] += hist
+
+        # Now normalize the distributions
+        for node in self.nodelist:
+            hist = self[node]['distribution'][0]
+            hist /= hist.sum()
+
+    def plot_distribution(self, node, **keywords):
+        
+        """Once the distributions have been calculated they can be
+        plotted as a probability distribution curve."""
+
+        if node in self.data and 'distribution' in self[node]:
+
+            dist, bins = self[node]['distribution']
+            height = 0.75*(bins[1]-bins[0])
+
+            p.figure(figsize=(12,5))
+            ax1 = p.subplot(121)
+            self[node].plot()
+            ylim = ax1.get_ylim()
+            ax2 = p.subplot(122)
+            p.barh(bins[0:-1], dist, height=height, label=self[node]['name'])
+            p.xlabel('PDF')
+ 
+# class MSTfit:
+
+#     """A class that allows one to analyize MST data from an MSTfit
+#     IDL save file."""
+
+#     def __init__(filename = None):
+
+#         try:
+#             self.fit = idl.readsav(filename)
+#         except:
+#             print 'Can not open ' + filename
+
