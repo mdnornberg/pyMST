@@ -1,13 +1,14 @@
 # We load all of the relevant modules from standard libraries...
-from pmds import mdsconnect, mdsdisconnect, mdsopen, mdsclose, mdsvalue
 from os import path, mkdir, remove
 import shelve
+import datetime
 
 # and from third-party libraries...
 from scipy import *
-from scipy.io import idl
+#from scipy.io import idl
 from scipy.signal import resample, cspline1d, cspline1d_eval, medfilt
 import pylab as p
+from MDSplus import Connection
 
 from analysis_util import *
 
@@ -17,40 +18,125 @@ store_data_locally = True
 local_path = path.expanduser('~/p/mst/data')
 if not path.isdir(local_path): mkdir(local_path)
 
+# Global caches. 
+# It turns out that opening and closing connections to the server can 
+# cause the server to become unresponsive. This may be because the mdsip 
+# processes on the server get locked up some how, I'm not sure. 
+_SVR_CONNS = {} # Connection objects indexed by server address.
+_SVR_SHOTS = {} # Shot numbers indexed by server address.
+_SVR_TREES = {} # Tree names indexed by server address.
+
+def _get_svr_cached(svr):
+    """For the given server address, return the cached connection object,
+    tree name, and loaded shot number.
+    """
+    try:
+        return _SVR_CONNS[svr], _SVR_TREES[svr], _SVR_SHOTS[svr] 
+    except:
+        return None, None, None
+    
+    
+def _update_svr_cache(svr, conn, tree, shot):
+    _SVR_CONNS[svr] = conn
+    _SVR_TREES[svr] = tree
+    _SVR_SHOTS[svr] = shot
+
+
+def get_server_for_shot(shot):
+    """Get the server address for the given shot number. Shots for the 
+    current day are in aurora, while previous days are on dave.
+    """
+    first = min_shot_for_date(datetime.date.today())
+    if shot >= first:
+        return 'aurora.physics.wisc.edu'
+    else:
+        return 'dave.physics.wisc.edu'
+
+def min_shot_for_date(date):
+    """Return the minimum shot number for the given date."""
+    y = date.year
+    m = date.month
+    d = date.day
+    return (y % 1000 + 100) * 10000000 + m * 100000 + d * 1000 + 1
+
+
+def max_shot_for_date(date):
+    """Return the maximum shot for the given date."""
+    return min_shot_for_date(date) + 998
+
+
+def shot_to_date(shot):
+    """Return the date corresponding to the given shot number."""
+    day = int(shot / 1000) % 100
+    month = int(shot / 100000) % 100
+    year = int(shot / 10000000) + 1900
+    return datetime.date(year, month, day)
+
+
+def shot_to_date_num(shot):
+    """Given a shot, return a number corresponding to the full date. 
+    For example, given 1100502001, return 20100502. 
+    """
+    return date_to_date_num(shot_to_date(shot))
+
+
+def get_connection(shot, tree='mst'):
+
+    """Get an MDSplus connection object connected to the appropriate 
+    server and having the given tree and shot opened. 
+    """
+    svr = get_server_for_shot(shot)
+    conn, tree_, shot_ = _get_svr_cached(svr)
+        
+    if conn is None:
+        conn = Connection(svr)
+        
+    if tree != tree_ or shot != shot_:
+        try:
+            # This throws an exception if there are no open trees. 
+            conn.closeAllTrees()
+        except:
+            pass
+        conn.openTree(tree, shot)
+        
+    _update_svr_cache(svr, conn, tree, shot)
+    
+    return conn
+
+        
+
 class Signal(dict):
 
     """A signal class to provide an organiational scheme for storing
     timeseries data."""
 
     def __init__(self, shot, nodepath, dims = [],
-                 server='dave.physics.wisc.edu',
                  tree='mst'):
 
         # Use either the defaults or specified values for the tree,
         # server, shot and nodepath to the data on the MDSPlus server
+        self['shot'] = shot 
         self['tree'] = tree
-        self['server'] = server
-        self['shot'] = shot
         self['nodepath'] = nodepath
+        self['server'] = get_server_for_shot(shot)
 
         # The name of this signal will be whatever is at the end of
         # the nodepath
         self['name'] = (nodepath.split(':'))[-1]
 
         # Retreive the data from the MDSPlus tree on dave.physics.wisc.edu
-        mdsconnect(self['server'])
-        mdsopen(self['tree'], self['shot'])
+
         try:
-            self['signal'] = mdsvalue(nodepath)
+            conn = get_connection(shot, tree)
+            sig_data = conn.get(nodepath)
+            self['signal'] = sig_data.data()
 
         # If there is no data available in the node then there is no
         # point in doing anything more. Close the MDSPlus connection
         # and return.
         except: 
-            print nodepath + " is not availble for this shot on server " 
-            + server + '.'
-            mdsclose(self.tree, self.shot)
-            mdsdisconnect()
+            print self['nodepath'] + " is not availble for shot " + \
+            str(self['shot']) + " on server " + self['server'] + '.'
             return
 
         # Is the data we obtained a string? If so, we're done
@@ -61,41 +147,40 @@ class Signal(dict):
         ndims = self['signal'].shape
 
         if len(ndims) == 1: 
-            try: self['time'] = mdsvalue('dim_of('+nodepath+')')
+            try: 
+                time_data = conn.get('dim_of({0})'.format(nodepath))
+                self['time'] = time_data.data()
             except: pass
         elif len(ndims) == len(dims):
             for d in dims:
-                self[d] = mdsvalue('dim_of('+nodepath+','+
-                                   str(dims.index(d)) + ')')
+                self[d] = conn.get('dim_of({0},{1})'.format(nodepath, 
+                                                            dims.index(d)))
         else:
             print "Number of dimensions of " + nodepath 
             + " is not the same as \'dims\' argument."
 
         # Let's see if there's any more meta data like units and error bars
         try: 
-            self['units'] = mdsvalue('units_of(' + nodepath + ')')
-
+            self['units'] = conn.get('units_of({0})'.format(nodepath))
             # If the units are just whitespace then delete the object
             if self['units'].split() == []: del self['units']
         except: pass
 
         try:
-            self['time_units'] = mdsvalue('units_of(dim_of('+nodepath+'))')
-
+            t_units_str = 'units_of(dim_of({0}))'.format(nodepath)
+            self['time_units'] = conn.get(t_units_str)
             # If the units are just whitespace then delete the object
             if self['time_units'].split() == []: del self['time_units']
         except: pass
 
         try: 
-            self['error'] = mdsvalue('error_of(' + nodepath + ')')
+            err_str = 'error_of({0})'.format(nodepath)
+            self['error'] = conn.get(err_str)
             self['min'] = self['signal'] - self['error']
             self['max'] = self['signal'] + self['error']
         except: pass
 
-        # Close the database        
-        mdsclose(self['tree'], self['shot'])
-        mdsdisconnect()
-        
+
     def plot(self, *args, **keywords):
         
         """Plot the signal. Arguments and keywords are passed to the
@@ -161,8 +246,6 @@ class Signal(dict):
                                       window=None)
 
 
-           ax2.set_ylim(ylim)
-
 class MSTdata:
 
     """A class that allows one to analyize MST data from the MDSPlus
@@ -177,22 +260,22 @@ class MSTdata:
     # object which will contain the signals requested in its 'data'
     # member. The signals will also be stored to a local database.
 
-    def __init__(self, shot, server='dave.physics.wisc.edu'):
+    def __init__(self, shot, tree='mst'):
 
         self.shot = shot  # Remember the shot number we're looking at
+        self.tree = tree
         self.data = {}    # Create a dictionary to store the signals
         self.shelf_path() # Note that this method replaces itself with
                           # a path string
-        self.server = server # Allow the user to pass a server address
-                             # (Default to dave.physics.wisc.edu).
-
+        self.server = get_server_for_shot(shot)
+        
         # If there is already locally stored data then read it in.
         if self.shelf_exists(): self.read_shelf()
             
     def __getitem__(self, nodepath=''):
 
         """The idea here is to provide an easy method for grabbing signal
-        data based on a call
+        data based on a dictionary reference.
         
         signal = MSTdata['subtree::nodepath']
         """        
@@ -242,8 +325,7 @@ class MSTdata:
                 else: nodepath = node
                 if not self.data.has_key(subtree): self.data[subtree] = {}
                 name = node.split(':')[-1]
-                self.data[subtree][name] = Signal(self.shot, nodepath, dims, 
-                                                  server=self.server)
+                self.data[subtree][name] = Signal(self.shot, nodepath, dims)
             except:
                 print 'Error reading ' + nodepath
                 continue
@@ -251,16 +333,15 @@ class MSTdata:
         # Now update the local database
         if local_store: self.store()
 
-    def get_node_list_recursive(self, subtree='\\top'):
+    def get_node_list_recursive(self, subtree='top'):
 
         """Get a list of ALL the available nodes in a subtree."""
         node_list = []
 
         try: 
-            mdsopen(self.tree, self.shot)
-            node_list = mdsvalue('getnci("\\' + subtree + \
-                                          '***","NODE_NAME")')
-            mdsclose(self.tree, self.shot)            
+            conn = get_connection(shot)
+            mdsplus_expr = 'getnci("\\{0}***","NODE_NAME")'.format(subtree)
+            node_list = conn.get(mdsplus_expr)
 
             # Strip out the extra whitespace in the node names
             node_list = [ node.strip() for node in node_list ]
@@ -278,10 +359,9 @@ class MSTdata:
         node_list = []
 
         try:
-            mdsopen(self.tree, self.shot)
-            node_list = mdsvalue('getnci("\\' + subtree + \
-                                          '...", "NODE_NAME")')
-            mdsclose(self.tree, self.shot)
+            conn = get_connection(shot, tree)
+            mdsplus_expr = 'getnci("\\{0}...","NODE_NAME")'.format(subtree)
+            node_list = conn.get(mdsplus_expr)
 
             # Strip out the extra whitespace in the node names
             node_list = [ node.strip() for node in node_list ]
@@ -396,12 +476,14 @@ class MSTdata:
         if self.shelf_exists():
             remove(self.shelf_path)
 
+# Now we provide a series of methods to obtain common groups of signals.
+
     def get_proc_ops(self):
 
         """Get all the signals in \mst_ops:proc_ops."""
 
         subtree = 'mst_ops.proc_ops'
-        node_list = self.get_node_list(subtree)
+        node_list = self.get_node_list_recursive(subtree)
         self.get(node_list, 'mst_ops')
 
     def get_magnetic_modes(self, 
@@ -467,7 +549,7 @@ class MSTdata:
                  'temp_17to_32', 'chi2_17to32' ]
 
         self.get(nodes, subtree)
-           
+
     def get_ts(self):
 
         """Read in the Thompson Scattering temperature data."""
@@ -634,6 +716,7 @@ class Ensemble(dict):
             ax2 = p.subplot(122)
             p.barh(bins[0:-1], dist, height=height, label=self[node]['name'])
             p.xlabel('PDF')
+            ax2.set_ylim(ylim)
  
 # class MSTfit:
 
