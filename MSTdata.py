@@ -1,3 +1,9 @@
+# A couple of Python classes for reading in MST data from the MDSplus
+# servers and doing some simple analysis tasks.
+#
+# Written by Mark Nornberg 3/6/2012 
+# (with some code copied from J.D. Lee's mdsplus module)
+
 # We load all of the relevant modules from standard libraries...
 from os import path, mkdir, remove
 import shelve
@@ -18,7 +24,7 @@ store_data_locally = True
 local_path = path.expanduser('~/p/mst/data')
 if not path.isdir(local_path): mkdir(local_path)
 
-# Global caches. 
+# Here's where I shamelessly steal JD Lee's code for Global caches. 
 # It turns out that opening and closing connections to the server can 
 # cause the server to become unresponsive. This may be because the mdsip 
 # processes on the server get locked up some how, I'm not sure. 
