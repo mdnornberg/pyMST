@@ -53,45 +53,57 @@ class IDSII_analysis(MSTdata):
         # Now let's define the beam-on and beam-off times and store
         # them.
         DNB_on = DNB_current['signal'] > 0.5
-        DNB['start'] = DNB_current['time'][DNB_on][0]
-        DNB['stop'] = DNB_current['time'][DNB_on][-1]
+        DNB['DNB_start'] = DNB_current['time'][DNB_on][0]
+        DNB['DNB_stop'] = DNB_current['time'][DNB_on][-1]
 
-    def get_idsii_raw(self):
+    def get_idsii_raw(self, good_chn=arange(1,33)):
 
-        """Read in the raw IDSII spectrometer data."""
+        """Read in the raw IDSII spectrometer data.
+
+        Optional input:
+        good_chn = [ 1, 2, 3, ..., 16 ] by default.
+
+        Change if any channels are not working or viewing spurious
+        lines."""
+
         subtree = 'mraw_ids'
         
         # The spectrometer has two fiber views projected onto channels
         # 1-16 and 17-32. Here we will gather both views into 2D
         # arrays.
-        nodes_fiber1 = [ r'idsii_' + str(i) for i in range(1,17) ]
-        nodes_fiber2 = [ r'idsii_' + str(i) for i in range(17,33) ]
-        nodes = nodes_fiber1 + nodes_fiber2
+        nodes_fiber1 = [ 'idsii_{0}'.format(i) for i in
+                         good_chn[good_chn<17] ]
+        n_fiber1 = len(nodes_fiber1)
+
+        nodes_fiber2 = [ 'idsii_{0}'.format(i) for i in
+                         good_chn[good_chn>16] ]
+        n_fiber2 = len(nodes_fiber2)
 
         # First gather all of the signals
-        self.get(nodes, subtree)
-
-        # Now create references that collect the 
-        n = len(self.data[subtree][nodes_fiber1[0]])
-        fiber1_data = zeros([16,n])
-        fiber2_data = zeros([16,n])
+        self.get(nodes_fiber1 + nodes_fiber2, subtree)
 
         # Create two 2D arrays for more efficient data analysis
         raw_data = self.data['mraw_ids']
-        null_time = raw_data['idsii_1']['time'] < 0.0
+        null_time = raw_data[nodes_fiber1[0]]['time'] < 0.0
+        n_time = len(raw_data[nodes_fiber1[0]]['time'])
 
-        spec_emiss_1 = zeros([16, len(raw_data['idsii_1']['time'])])
-        spec_emiss_2 = zeros_like(spec_emiss_1)
-        for i in range(1,17):
-            spec_emiss_1[i-1,:] = \
-                raw_data['idsii_' + str(i)]['signal'] - \
-                raw_data['idsii_' + str(i)]['signal'][null_time].mean()
-            spec_emiss_2[i-1,:] = \
-                raw_data['idsii_' + str(i+16)]['signal'] - \
-                raw_data['idsii_' + str(i+16)]['signal'][null_time].mean()
+        spec_emiss_1 = zeros([n_fiber1, n_time])
+        spec_emiss_2 = zeros([n_fiber2, n_time])
 
-        #if not self.data.has_key('idsii_analysis'):
-        #    self.data['idsii_analysis'] = {}
+        # Remove the baseline zero-voltage (this should be a constant
+        # offset dependant only upon the dial settings on the PMT gain
+        # adjustment control.
+        for i in range(0,n_fiber1):
+            spec_emiss_1[i,:] = \
+                raw_data[nodes_fiber1[i]]['signal'] - \
+                raw_data[nodes_fiber1[i]]['signal'][null_time].mean()
+        for i in range(0,n_fiber2):
+            spec_emiss_2[i,:] = \
+                raw_data[nodes_fiber2[i]]['signal'] - \
+                raw_data[nodes_fiber2[i]]['signal'][null_time].mean()
+
+        if not self.data.has_key('idsii_analysis'):
+            self.data['idsii_analysis'] = {}
         self.data['idsii_analysis']['spec_emiss_1'] = spec_emiss_1
         self.data['idsii_analysis']['spec_emiss_2'] = spec_emiss_2
         self.data['idsii_analysis']['time'] = raw_data['idsii_1']['time']
@@ -144,14 +156,21 @@ class IDSII_analysis(MSTdata):
         if plot == True:
 
             angles = arange(14, 51, 0.5)
-            p.plot(angles, spec_cal(angles))
-            p.xlabel('Spectrometer Grating Angle [deg]')
-            p.ylabel('Wavelength \u212B')
-
+            p.plot(angles, spec_cal(angles),'-b', label='Calibration curve')
+            p.xlabel(r'$\rm{Spectrometer\ Grating\ Angle}\ [^\circ]$')
+            p.ylabel(r'$\rm{Wavelength}\ [\AA]$')
+            p.plot(cal_grating_angle,cal_wavelength, 'or', label='Calibration data')
+            p.plot(analysis['grating_angle'], lam_0, '^g', label='Current position', ms=10)
+            p.legend()
+            
         # Next, let's find the corresponding calibration file for the
         # individual channel centroids and assign wavelengths to each
         # spectrometer channel.
-        cent_fname = { 3433: 'cent_600_mar09_new.dat'}[int(lam_0)]
+        cent_fname = { 3433: 'cent_600_mar09_new.dat',
+                       2981:
+                           'cent_{0}_aug10_boron.dat'.format(pmt_volt)
+                       }[int(lam_0)]
+                       
         with open(path.join(calib_dir, cent_fname)) as f_cent:
             centroids = f_cent.read()
         lambda_12 = array(centroids.split()).astype('float')
@@ -173,15 +192,33 @@ class IDSII_analysis(MSTdata):
                         2981: ('B+5',  10.811,  1),
                         2974: ('O+8',  15.9994, 1),
                         }
+        analysis = self.data['idsii_analysis']
+        lam_0 = analysis['lam_0']
         if line_models.has_key(int(lam_0)):
             (imp_ion, m_ion, order) = line_models[int(lam_0)]
-                    
+        analysis['imp_ion'] = imp_ion
+        analysis['m_ion'] = m_ion
+        analysis['order'] = order
 
-    def PMT_normalizations(self):
+        # Once we have the central line and species identified, we can
+        # look up the j-resolved fine structure components of the
+        # emission line
+
+
+    def PMT_normalizations(self, pmt_voltage=None):
+
+        analysis = self.data['idsii_analysis']
+
+        # Allow the user to override the stored PMT voltage with one
+        # specified in the method call.
+        if pmt_voltage is not None: 
+            analysis['PMT voltage'] = pmt_voltage 
+        else:
+            pmt_voltage = analysis['PMT voltage']
 
         # IDS PMT normalization
         # ==> set PMT value to nearest 50 V setting betwen 400 and 800 V
-        pmt_voltage_1 = ((( long(abs(pmt_voltage)/50.+0.5)*50 )>400)<800)
+        pmt_volt = ((( long(abs(pmt_voltage)/50.+0.5)*50 )>400)<800)
         # ==> read in appropriate normalization file
 
         if pmt_volt == 600: 
@@ -191,7 +228,21 @@ class IDSII_analysis(MSTdata):
         with open(filename) as f:
             pmt_norm = f.read()
         pmt_norm = array(pmt_norm.split()).astype('float')
-        self.data['ids_analysis']['norm'] = pmt_norm
+        analysis['PMT Normalization'] = pmt_norm
+
+        # Make sure to grab the raw data if we haven't already
+        if not analysis.has_key('spec_emiss_1'):
+            self.get_idsii_raw()
+
+        # Normalize the individual PMT signals based on the relative
+        # gain calibrations
+        spectrum_1 = analysis['spec_emiss_1']
+        spectrum_2 = analysis['spec_emiss_2']        
+        spectrum_1 = (spectrum_1.transpose() /
+                      pmt_norm[0:16]).transpose()
+        spectrum_2 = (spectrum_2.transpose() /
+                      pmt_norm[16:32]).transpose()
+        
 
     def transfer_funcion():
         

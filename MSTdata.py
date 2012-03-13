@@ -10,7 +10,7 @@ import shelve
 import datetime
 
 # and from third-party libraries...
-from scipy import *
+from numpy import *
 #from scipy.io import idl
 from scipy.signal import resample, cspline1d, cspline1d_eval, medfilt
 import pylab as p
@@ -20,7 +20,7 @@ from analysis_util import *
 
 # Here is where you should pick the location of your local data
 # storage directory
-store_data_locally = True
+store_data_locally = False
 local_path = path.expanduser('~/p/mst/data')
 if not path.isdir(local_path): mkdir(local_path)
 
